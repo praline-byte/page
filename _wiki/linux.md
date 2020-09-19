@@ -11,43 +11,39 @@ topmost: true
 
 ## 磁盘相关
 ### 磁盘使用率
-```shell script
+```
 df -lh
 ```
+
 ### 磁盘空间大小
-```shell script
+```
 du -sh
 ```
+
 ### 磁盘IO
-```shell script
+```
 sar -d -p 1
 ```
 
 ## 网络与端口
 ### 查看端口是否打开
-```shell script
+```
 telnet 10.211.55.12 6379 
 nc -v 10.211.55.12 6379
 ```
 
 ### 查看端口被什么进程占用
-```shell script
+```
 sudo netstat -ltpn | grep :22
 sudo lsof -n -P -i:22
 ```
 
 ### 查看进程监听的端口号
-```shell script
+```
 sudo netstat -atpn | grep 1333
 sudo lsof -n -P -p 1333 | grep TCP
 ```
 
-## 压缩
-```shell script
-分卷压缩 zip -s SIZE origin.zip --out new.zip
-解压 zip spiltfile.zip -s=0 --out single.zip
-加密压缩 -P
-```
 
 ## 实用命令汇总
 ### lsof
@@ -57,28 +53,26 @@ sudo lsof -n -P -p 1333 | grep TCP
 
 #### 查看端口被什么进程占用
 
-```shell script
+```
 lsof -n -P -i:22
 ```
 
 #### 查看进程监听的端口号
 
-```shell script
+```
 sudo lsof -n -P -p 1333 | grep TCP
 ```
 
 #### 查看某个文件被谁占用
 
-```sh
+```
 lsof .linux.md.swp
 ```
 
 #### 查看某个用户占用的文件信息
 
 ```sh
-lsof -u mazhuang
+lsof -u {user}
 ```
 
 `-u` 后面可以跟 uid 或 login name。
-
-`bundle exec jekyll serve` 本站本地启动
