@@ -80,3 +80,5 @@ lsof -u mazhuang
 ```
 
 `-u` 后面可以跟 uid 或 login name。
+
+`bundle exec jekyll serve` 本站本地启动

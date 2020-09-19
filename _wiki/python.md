@@ -33,7 +33,7 @@ JSON 编码解码器。
   ```sh
   :%!python -m json.tool
   ```
-
+![](.python_images/bf67c5b0.png)
 ### CGIHTTPServer
 
 简单实用的 HTTP 服务器。
