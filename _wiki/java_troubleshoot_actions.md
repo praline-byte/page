@@ -1,6 +1,6 @@
 ---
 layout: wiki
-title: java 故障排查操作指南
+title: Java 故障排查操作指南
 categories: Java
 description: 
 keywords: java

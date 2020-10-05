@@ -1,7 +1,7 @@
 ---
 layout: wiki
-title: go 故障排查操作指南
-categories: go
+title: Go 故障排查操作指南
+categories: Go
 description: 
 keywords: go
 ---
