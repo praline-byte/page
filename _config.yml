@@ -4,10 +4,10 @@
 baseurl:
 url: https://praline-byte.github.io/page
 date_format: "ordinal"
-title: Enrich Life
-subtitle: "公众号：---"
-description: "晚上吃鸡公煲的个人博客，公众号：准备中---"
-keywords: 晚上吃鸡公煲，兜里有块糖，praline
+title: Learn and Live
+subtitle: "Keep Running Forward Bravely"
+description: "晚上吃鸡公煲的个人博客"
+keywords: 搜索引擎 读书笔记
 timezone: Asia/Shanghai
 encoding: "utf-8"
 side_bar_repo_limit: 5
@@ -112,7 +112,7 @@ collections:
 #      Comments    #
 # ---------------- #
 # support provider: disqus, gitment, gitalk
-comments_provider: gitalk
+#comments_provider: gitalk
 # !!!重要!!! 请修改下面这些信息为你自己申请的
 # !!!Important!!! Please modify infos below to yours
 # https://disqus.com
