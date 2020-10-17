@@ -128,7 +128,7 @@ gitment:
 # https://github.com/gitalk/gitalk#install
 gitalk:
     owner: praline
-    repo: https://github.com/praline-byte/page-comments
+    repo: https://praline-byte.github.io
     clientID: f8fb8f8f5b9d7452dfe0
     clientSecret: 559dd0d8e28930240d8d1308b8fb2da5c2ae79af
 # 在使用其它评论组件时可点击显示 Disqus
