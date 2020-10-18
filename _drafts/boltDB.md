@@ -1,16 +1,18 @@
 
-# B+树
-
 
 # BoltDB 简介
 
-BoltDB 一个 go 实现的 key/value 数据库
+存储引擎一般的分为两大类，日志结构（log-structured） 的存储引擎（例如LSM树），和面向页面（page-oriented） 的存储引擎（例如B树）
+
+BoltDB 是面向页面的存储引擎，使用 go 实现的 key/value 型数据库
 
 目标是为不需要完整数据库服务器（如 Postgres 或MySQL）的项目提供一个简单，快速和可靠的数据库
 
 支持事务(ACID)，使用 MVCC 和 COW，允许多个读事务和一个写事务并发执行，但是读事务会阻塞写事务
 
-使用它的有 etcd, consul，以及我们 lark_ark 服务中使用的搜索引擎 bleve 默认使用的也是 boltdb
+使用它的有开源的 etcd, consul，在公司视频架构内部用于uploader（重构之后的voc模块）保存分片上传的元信息，以及我们 lark_ark 服务中使用的搜索引擎 bleve 默认使用的也是 boltdb
+
+使用它未必是因为性能有多高而是简单可靠，在工程中可控 
 
 # 数据结构
 了解任何一个工程，都要了解它的数据结构，要知道是什么对象在工程里流转，盘活整个上下文逻辑
@@ -18,15 +20,25 @@ BoltDB 一个 go 实现的 key/value 数据库
 ## boltDB 数据库文件的基本格式
 ![](images/posts/boltDB_images/数据库文件内部布局.png)
 
-数据库文件以页为基本单位，一个数据库文件由若干页组成。一个页的大小是由当前OS决定的，即通过os.GetpageSize()来决定，对于32位系统，它的值一般为4K字节。一个Boltdb数据库文件的前两页是meta页，第三页是记录freelist的页面，第四页及后续各页则是用于存储K/V的页面。
+数据库文件以页为基本单位，一个数据库文件由若干页组成。一个页的大小是由当前OS决定的，即通过 os.GetpageSize() 来决定，对于32位系统，它的值一般为4K字节。一个Boltdb数据库文件的前两页是meta页，第三页是记录freelist的页面，第四页及后续各页则是用于存储K/V的页面，由他们来构建 B+树。
+
+## BoltDB 中的 B+树结构
+
+![](images/posts/boltDB_images/boltDB中的B+树结构.png)
+
+boltdb 中有 3 个结构和 B+ 树密切相关：
+
+- page: 大小一般为 4096 bytes，对应文件里的每个 page，读写文件都是以 page 为单位。
+- node: B+ 树的单个结点，访问结点时首先将 page 的内容转换为内存中的 node，每个 node 对应一个或多个连续的 page。
+- bucket: 每个 bucket 都是一个完整的 B+ 树，所有操作都是针对 bucket
 
 ## page 的类型定义
 ```
 const (
-    branchPageFlag   = 0x01
-    leafPageFlag     = 0x02
-    metaPageFlag     = 0x04
-    freelistPageFlag = 0x10
+	branchPageFlag   = 0x01 // 分支节点
+	leafPageFlag     = 0x02 // 叶子节点
+	metaPageFlag     = 0x04 // meta 页
+	freelistPageFlag = 0x10 // freelist 页，存放无数据的空 page id
 )
 
 ......
@@ -34,38 +46,477 @@ const (
 type pgid uint64
 
 type page struct {
-    id       pgid
-    flags    uint16
-    count    uint16
-    overflow uint32
-    ptr      uintptr
+	id       pgid   // 页 id
+	flags    uint16 // 此页中保存的具体数据类型，即上面四个 Flag
+	count    uint16 // 数据计数
+	overflow uint32 // 是否有后序页，如果有，overflow 表示后续页的数量
 }
 ```
 - id: 页面id，如0, 1, 2，...，是从数据库文件内存映射中读取一页的索引值
-- flags: 页面类型，可以分为branchPageFlag、leafPageFlag、metaPageFlag 和 freelistPageFlag，表示内节点，叶子节点，meta 节点和 freelist 节点
-- count: 页面内存储的元素个数，只在branchPage或leafPage中有用，对应的元素分别为branchPageElement和leafPageElement；
-- overflow: 当前页是否有后续页，如果有，overflow表示后续页的数量，如果没有，则它的值为0，主要用于记录连续多页；
-- ptr：用于标记页头结尾或者页内存储数据的起始处，一个页的页头就是由上述id、flags、count和overflow构成。需要注意的是，ptr本身不是页头的组成部分，它不是页的一部分，也不被存于磁盘上。
+- flags: 页面类型，可以分为branchPageFlag、leafPageFlag、metaPageFlag 和 freelistPageFlag，表示分支节点，叶子节点，meta 节点和 freelist 节点
+- count: 页面内存储的元素个数，只在分支节点和叶子节点中有用，对应的元素分别为 branchPageElement 和 leafPageElement
+- overflow: 当前页是否有后续页，如果有，overflow表示后续页的数量，如果没有，则它的值为0，主要用于记录连续多页
 
+## page 的内存布局
 
-## page 的基本格式
+![](images/posts/boltDB_images/page的基本格式.png)
+
+> 旧版本的实现中会有一个额外的ptr字段指向数据存储地址，但在 Go 1.14 中无法通过指针安全性检查，因此这个字段已经去除了。
+>
+> 详细了解可以参考[PR#201 Fix unsafe pointer conversions caught by Go 1.14 checkptr](https://github.com/etcd-io/bbolt/pull/201)
+
+## elements 的类型定义
+
+pageHeader之后就是具体的数据存储结构。每一个键值对用一个 Element 结构体表示，并利用偏移量pos进行指针运算获取键值对的存储地址：&Element + pos == &key
+
+```
+// branchPageElement represents a node on a branch page.
+type branchPageElement struct {
+	pos   uint32 // Element 对应 key 存储位置相对于当前 Element 的偏移量
+	ksize uint32 // Element 对应 key 的大小，以 byte 为单位
+	pgid  pgid   // Element 指向的子节点所在 page id
+}
+
+······
+
+// leafPageElement represents a node on a leaf page.
+type leafPageElement struct {
+	flags uint32 // 当前 Element 是否代表一个 Bucket，如果是则其值为 1，如果不是则其值为 0;
+	pos   uint32 // Element 对应的键值对存储位置相对于当前 Element 的偏移量
+	ksize uint32 // Element 对应 key 的大小，以 byte 为单位
+	vsize uint32 // Element 对应 value 的大小，以 byte 为单位
+}
+```
+- branchPageElement：只存储 key 的大小字段 ksize 和下一级页面的 pgid，用于数据索引。
+- leafPageElement：用于存储真实的键值对数据，因此增加了 vsize 字段，以快速获取查询的键值对信息。
+
+## elements 的内存布局
+
+![](images/posts/boltDB_images/elements的内存布局.png)
+
+将 Element 和键值对分开存储减少了查找的时间，因为Element结构体的大小是固定的，我们可以在 O(1) 时间复杂度内获取所有的Element ，若是以 [header，key value...] 格式存储，需要按顺序遍历查找。
+
+## node 的类型定义
+
+Page 加载到内存中要反序列化为 node，以便进行数据修改操作。一个 node 表示为一个 B+Tree 节点，因此需要额外的 unbalanced 与 spilled 字段表明节点是否需要旋转与分裂。node中还会存储父节点与子节点的指针，用于对 key 进行范围查询
+
+```
+// node represents an in-memory, deserialized page.
+type node struct {
+	bucket     *Bucket // 每一个 Bucket 都是一个完整的 B+ Tree
+	isLeaf     bool    // 区分 branch 和 leaf
+	unbalanced bool    // 是否平衡
+	spilled    bool    // 是否溢出
+	key        []byte  // 该 node 的起始 key
+	pgid       pgid
+	parent     *node  // 父节点指针
+	children   nodes  // 子节点指针
+	inodes     inodes // 存储键值对的结构体数组
+}
+
+type inode struct {
+	flags uint32 // 用于 leaf node，是否代表一个 subbucket
+	pgid  pgid   // 用于 branch node, 子节点的 page id
+	key   []byte
+	value []byte
+}
+
+type inodes []inode // page中的键值对会存在node.inodes中，并且一一对应，可以通过切片下标访问某个键值对
+```
+
+boltDB 通过 node.read(p *page)，实现 page 的反序列化过程，将 page 实例化为 node
+```
+// read initializes the node from a page.
+func (n *node) read(p *page) {
+    
+    ······  
+
+	// 向 inodes 中填充键值对
+	n.inodes = make(inodes, int(p.count))
+	for i := 0; i < int(p.count); i++ {
+		inode := &n.inodes[i]
+
+		// 如果是leafPage，inode.flags即为元素的flags，key 和 value 分别为元素对应的 Key 和 Value
+		if n.isLeaf {
+			elem := p.leafPageElement(uint16(i))
+			inode.flags = elem.flags
+			inode.key = elem.key()
+			inode.value = elem.value()
+
+	    // 如果是branchPage，inode.pgid即为子节点的页号，inode 与 page 中的Element一一对应	
+		} else {
+			elem := p.branchPageElement(uint16(i))
+			inode.pgid = elem.pgid
+			inode.key = elem.key()
+		}
+		_assert(len(inode.key) > 0, "read: zero-length inode key")
+	}
+
+    ······
+}
+```
+
+## bucket
+
+每一个 bucket 都是一个完整的 B+Tree，将多个节点页面组织起来。对于 boltDB 来说，bucket 属于对外的结构，我们在 CRUD 中详细说明
 
 
 # CRUD
 
-初始化
+## 读流程
 
-增
+![](images/posts/boltDB_images/读-流程图.png)
 
-删
+一个典型的查找过程如下：
 
-改
+1. 首先找到 Bucket 的根节点，也就是 B+ 树的根节点的 page id
+2. 读取对应的 page，转化为内存中的 node
+3. 若是 branch node，则根据 key 查找合适的子节点的 page id
+4. 重复2、3直到找到 leaf node，返回 node 中对应的 val
 
-查
+为了便于数据查询过程，引入 Cursor， 包含该迭代器正在遍历的 Bucket 和存储搜索路径的栈
+```
+type Cursor struct {
+    bucket *Bucket  // 遍历的 bucket
+    stack []elemRef // 记录游标的搜索路径，最后一个元素指向游标当前位置
+}
+
+type elemRef struct {
+    page *page      // 当前节点的 page
+    node *node      // 当前节点的 node
+    index int       // page 或 node 中的下标
+}
+```
+
+stack是一个切片，每个elemRef指向 B+ Tree 的一个节点，节点可能是已经实例化的node，也可能是未实例化的page，elemRef会存储对应结构的指针，另一个指针则为空，并记录键值对所在的位置。
+
+进行查询时，Cursor 首先从 Bucket.root 对应的 page 开始递归查找，直到最终的叶子节点。Cursor.stack 中保存了查找对应 key 的路径，栈顶保存了 key 所在的结点和位置。除了常规的键值查询操作，Cursor 也支持查询 Bucket 的First、Last、Next、Prev方法，用于相关场景的优化
+
+
+
+## 写流程
+
+流程图
+
+![](images/posts/boltDB_images/写-流程图.png)
+
+### 怎么回收脏页
+
+事务提交时，将其对应的脏页添列表加进freelist的等待队列集合中。而数据结构DB中保存了所有正在进行中的事务ID。所有的写事务会递增ID，而读事务使用当前版本的ID（两个meta页中事务ID最大的一个）。因此，在创建新的写事物时，通过遍历DB中的所有事务，找出ID最小的minID, freelist的等待释放集合中任何小于minID的脏页列表都可以被安全释放
+
+db 中维护了正在进行的读事务:
+
+创建读事务时，会追加到 db.txs:
+
+`db.txs = append(db.txs, t)`
+
+当读事务 rollback 时(boltdb 的读事务完成要调用 Tx.Rollback())，会从中移除:
+
+`tx.db.removeTx(tx)`
+
+在创建写事务时，会找到 db.txs 中最小的 txid，释放 freelist.pending 中所有 txid 小于它的 pending page
+
+```
+var minid txid = 0xFFFFFFFFFFFFFFFF
+for _, t := range db.txs {
+    if t.meta.txid < minid {
+        minid = t.meta.txid
+    }
+}
+if minid > 0 {
+    // 会将 pending 中 txid 小于 minid - 1 的事务释放的 page 合入 ids
+    db.freelist.release(minid - 1) 
+}
+
+······
+
+// 释放 freelist.pending 中所有 txid 小于它的 pending page
+for tid, txp := range f.pending {
+    if tid <= txid {
+        m = append(m, txp.ids...)
+        delete(f.pending, tid)
+    }
+}
+
+```
+
+> 能不能在写事务提交的时候判断旧的 page 能不能用于分配，而不是在下一个写事务开始时清理？\
+> 是可以的，不过要求在写入 freelist 和 metadata 的时候不能有新的读事务进行，需要牺牲一定的性能。
+
+一次事务提交过程
+```
+// 提交事务
+func (tx *Tx) Commit() error {
+    ···
+	// 节点平衡
+	tx.root.rebalance()
+	if tx.stats.Rebalance > 0 {
+		tx.stats.RebalanceTime += time.Since(startTime)
+	}
+
+	// 节点分裂
+	if err := tx.root.spill(); err != nil {
+		tx.rollback()
+		return err
+	}
+    ···
+
+	// 调用 syscall.fcntl 将脏页刷到磁盘
+	if err := tx.write(); err != nil {
+		tx.rollback()
+		return err
+	}
+    ···
+
+	// 调用 syscall.fcntl 将 meta 数据刷到磁盘
+	if err := tx.writeMeta(); err != nil {
+		tx.rollback()
+		return err
+	}
+    ·····
+}
+```
+先对 b+树进行调整，再将脏页写到磁盘上，最后将 meta 数据落盘
+
+## API 示例
+
+
 
 # 事务
 
+boltdb 支持完整的事务特性(ACID)，使用 MVCC 并发控制，允许多个读事务和一个写事务并发执行，但是读事务有可能会阻塞写事务。
+
+- Atomicity: 未提交的写事务操作都在内存中进行；提交的写事务会按照 B+ 树数据、freelist、metadata 的顺序写入文件，只有 metadata 写入成功，整个事务才算完成，只写入前两个数据对数据库无影响。
+- Isolation: 每个读事务开始时会获取一个版本号，读事务涉及到的 page 不会被写事务覆盖；提交的写事务会更新数据库的版本号
+- Durability: 写事务提交时，会为该事务修改的数据(dirty page)分配新的 page，写入文件。
+
+
+## MVCC
+
+```
+type meta struct {
+    ······
+	root     bucket // 存储 rootBucket 所在的 page
+	freelist pgid   // freelist 所在的 pgid，初始化为 2
+	pgid     pgid   // 已经申请的 page 数量，值为 max_pgid +1
+	txid     txid   // 上次写事务的 id
+	checksum uint64 // 上面各字段的 64 位 FNV 哈希校验
+}
+```
+BoltDB 通过 meta 副本机制实现多版本并发控制，meta 页是事务读取数据的入口，记录了数据的版本信息与查询起点。
+
+数据库初始化时会将页号为 0 和 1 的两个页面设置为meta页，每个事务会获得一个txid，并选取txid % 2的 meta 页做为该事务的读取对象，每次写数据后会交替更新meta页。当其中一个出现数据校验不一致时会使用另一个meta页。
+```
+// write writes the meta onto a page.
+func (m *meta) write(p *page) {
+    ......
+
+    // 选取txid % 2的 meta 页做为该事务的读取对象
+    p.id = pgid(m.txid % 2)
+    p.flags |= metaPageFlag
+
+    // 计算 checksum.
+    m.checksum = m.sum64()
+
+    m.copy(p.meta())
+}
+```
+
+
+>每个事务都有一个 txid，其中db.meta.txid 保存了最大的已提交的写事务 id。BoltDB 对写事务和读事务执行不同的 id 分配策略：
+>- 读事务：txid == db.meta.txid；
+>- 写事务：txid == db.meta.txid + 1；
+>- 当写事务成功提交时，会更新了db.meta.txid为当前写事务 id.。
+
+## Atomicity
+完全执行或完全不执行
+
+BoltDB 的写操作都是在内存中进行，若事务未 commit 时出错，不会对数据库造成影响
+若是在 commit 的过程中出错，BoltDB 写入文件的顺序也保证了不会造成影响：因为数据会写在新的 page 中不会覆盖原来的数据，且此时 meta中的信息不发生变化。
+
+    1. 开始一份写事务时，会拷贝一份 meta数据；
+    2. 从 rootBucket 开始，遍历 B+树 查找数据位置并修改；
+    3. 修改操作完成后会进行事务 commit，此时会将数据写入新的 page；
+    4. 最后更新 meta 的信息
+
+因为 db 的信息如 root bucket 的位置、freelist 的位置等都保存在 metadata 中，只有成功写入 metadata 事务才算成功。 如果第一步时出错，因为数据会写在新的 page 不会覆盖原来的数据，且此时的 metadata 不变，后面的事务仍会访问之前的完整一致的数据
+
+关键就是要保证 metadata 写入出错也不会影响数据库
+
+boltDB 使用交替 metadata 和 checksum 保证 meta 不会损坏
+
+```
+// meta retrieves the current meta page reference.
+func (db *DB) meta() *meta {
+
+	// 保证 metaA 是最新的 meta 信息，也即 txid 最大的 meta
+	metaA := db.meta0
+	metaB := db.meta1
+	if db.meta1.txid > db.meta0.txid {
+		metaA = db.meta1
+		metaB = db.meta0
+	}
+
+	// 如果最新的 meta 不可用，则使用另一个 meta
+	if err := metaA.validate(); err == nil {
+		return metaA
+	} else if err := metaB.validate(); err == nil {
+		return metaB
+	}
+    ······
+}
+
+// validate checks the marker bytes and version of the meta page to ensure it matches this binary.
+func (m *meta) validate() error {
+	if m.magic != magic {
+		return ErrInvalid
+	} else if m.version != version {
+		return ErrVersionMismatch
+	} else if m.checksum != 0 && m.checksum != m.sum64() {
+		return ErrChecksum
+	}
+	return nil
+}
+```
+## Isolation
+boltdb 支持多个读事务与一个写事务同时执行，写事务提交时会释放旧的 page，分配新的 page，只要确保分配的新 page 不会是其他读事务使用到的就能实现 Isolation。
+
+在写事务提交时，释放的老 page 有可能还会被其他读事务访问到，不能立即用于下次分配，所以放在 freelist.pending 中， 
+只有确保没有读事务会用到时，才将相应的 pending page 放入 freelist.ids 中用于分配:
+
+    Reference：freelist 定义
+    freelist.pending: 维护了每个写事务释放的 page id。
+    freelist.ids: 维护了可以用于分配的 page id。
+
+
+## Durability
+
+在写事务 commit 时，会为脏 node 分配新的 page，同时将之前使用的 page 释放。freelist 中维护了当前文件中的空闲 page id，分配时会从 freelist.ids 中寻找合适的 page
+
+这里的分配 page 不是真的分配文件中某一 page 来写，而是分配了一个 buffer 和起始的 page id，首先将 node 的信息写入这个 buffer，之后统一的写入 page id 对应的文件位置
+```
+// 写事务提交时需要分配 page
+func (db *DB) allocate(txid txid, count int) (*page, error) {
+
+	// 为 page 分配临时 buffer
+	var buf []byte
+	if count == 1 {
+		// db.pagePool 是 sync.pool，缓存了大小为 page size 的 buffer
+		buf = db.pagePool.Get().([]byte)
+	} else {
+		buf = make([]byte, count*db.pageSize)
+	}
+
+	······
+
+	// 查找合适的连续的 page，返回首 page id
+	if p.id = db.freelist.allocate(txid, count); p.id != 0 {
+		return p, nil
+	}
+
+	// 如果当前文件没有足够的 free page，需要扩大文件并重新 mmap()
+	p.id = db.rwtx.meta.pgid
+	var minsz = int((p.id+pgid(count))+1) * db.pageSize
+	if minsz >= db.datasz {
+		if err := db.mmap(minsz); err != nil {
+			return nil, fmt.Errorf("mmap allocate error: %s", err)
+		}
+	}
+    ······
+}
+```
+
+
+
+
+
+## freelist
+
+当经过反复的增删改查后，文件中会出现没有数据的部分。被清空数据的页可能位于任何位置，BoltDB 并不打算搬移数据、截断文件来将这部分空间返还，而是将这部分空 page，加入内部的 freelist 来维护，当有新的数据写入时，复用这些空间。
+
+> 因此BoltDB 的持久化文件只会增大，而不会因为数据的删除而减少。
+
+todo 字段，更新
+```
+type freelist struct {
+    freelistType   FreelistType        // freelist type
+    ids            []pgid              // 维护了可以用于分配的 page id
+    allocs         map[pgid]txid       // mapping of txid that allocated a pgid.
+    pending        map[txid]*txPending // 维护了每个写事务释放的 page id
+    cache          map[pgid]bool       // fast lookup of all free and pending 
+}
+
+type txPending struct {
+    ids              []pgid
+    alloctx          []txid // txids allocating the ids
+    lastReleaseBegin txid   // beginning txid of last matching releaseRange
+}
+```
+
+freelist有FreelistArrayType与FreelistMapType两种类型，默认为FreelistArrayType格式，下面内容也是根据数组类型进行分析。当缓存记录为数组格式时，freelist.ids字段记录了当前空 page 的 pgid，当程序需要 page 时，会调用对应的freelist.arrayAllocate(txid txid, n int) pgid方法遍历ids，从中挑选出n 个连续的空page供调用者使用。
+
+当某个写事务产生无用 page时，将调用freelist.free(txid txid, p *page)将指定 page 放入freelist.pending池中，并将freelist.cache中将该 page 设为 true，需要注意的是此时数据被没有被清空。当下一个写事务开启时，会调用freelist.release(txid txid)方法将没有任何事务使用的pending池中的 page 搬移到ids中。
+
+BoltDB 这种设计思路，是为了实现多版本并发控制，加速事务的回滚，同时避免对读事务的干扰：
+
+当写事务更新数据时，并不会直接覆盖旧数据所在的页，而且分配一个新的 page 将更新后的数据写入，然后将旧数据占用的 page 放入freelist.pending池中，并建立新的索引。当事务需要回滚时，只需要将pending池中的 page 删除，将索引回滚为原来的页面。
+当发起一个读事务时，会单独复制一份meta信息，从这份独有的meta作为入口，可以读出该meta指向的数据。此时即使有写事务修改了相关 key 的数据，修改后的数据只会被写入新的 page，读事务引用的旧 page 会进入pending 池，与该读事务相关的数据并不会被修改。当该 page 相关的读事务都结束时，才会被复用修改
+
 # 高性能
+
+## MMAP
+妈妈牌技术，内存映射文件（Memory-Mapped File，mmap）
+
+![](images/posts/boltDB_images/mmap原理.png)
+
+mmap 是一种内存映射文件的方法，即将一个文件映射到进程的地址空间，实现文件磁盘地址和进程虚拟地址空间中一段虚拟地址的一一对映关系。
+
+实现这样的映射关系后，进程就可以采用指针的方式读写操作这一段内存，而系统会自动回写脏页面到对应的文件磁盘上，即完成了对文件的操作而不必再调用 read(),write() 等系统调用函数
+
+>传统的 UNIX 或 Linux 系统在内核中设有多个缓冲区，当我们调用 read()系统调用从文件中读取数据时，内核通常先将该数据复制到一个缓冲区中，再将数据复制到进程的内存空间。
+>会发生两次内存拷贝
+
+BoltDB 利用 mmap 将文件映射到内存中，直接访问这段内存获取数据，节省了从内核空间拷贝数据到用户进程空间的开销，提升了读取效率。
+```
+// mmap memory maps a DB's data file.
+func mmap(db *DB, sz int) error {
+
+	// 调用 mmap() 将整个文件映射进来，跨过了页缓存，减少了数据的拷贝次数，
+	b, err := syscall.Mmap(int(db.file.Fd()), 0, sz, syscall.PROT_READ, syscall.MAP_SHARED|db.MmapFlags)
+	if err != nil {
+		return err
+	}
+
+	// 调用 madvise(MADV_RANDOM) 由操作系统管理 page cache
+    // _, _, e1 := syscall.Syscall(syscall.SYS_MADVISE, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(advice))
+	if err := madvise(b, syscall.MADV_RANDOM); err != nil {
+		return fmt.Errorf("madvise: %s", err)
+	}
+
+	// 后续对磁盘上文件的所有读操作直接读取 db.data 即可，简化了实现
+	db.dataref = b
+	db.data = (*[maxMapSize]byte)(unsafe.Pointer(&b[0]))
+	db.datasz = sz
+	return nil
+}
+```
+
+## COW
+
+BoltDB 在写入文件时使用了写时复制技术（COW，Copy On Write），当一个页面被更新时，它的内容会被复制到一个新页面，旧页面会被释放。
+
+# 锁
+
+boltDB 中的六把锁
+
+```
+// 对 db 文件加锁，不允许多个进程对 db 文件进行写操作
+if err := flock(db, !db.readOnly, options.Timeout); err != nil {
+    _ = db.close()
+    return nil, err
+}
+```
+
 
 # 高可用
 
@@ -73,20 +524,12 @@ type page struct {
 
 
 
-
-
-mmap 妈妈牌技术
-BoltDB 采用一个单独的文件作为持久化存储，利用mmap将文件映射到内存中，并将文件划分为大小相同的 Page 存储数据，使用写时复制技术将脏页写入文件
-内存映射文件（Memory-Mapped File，mmap）技术是将一个文件映射到调用进程的虚拟内存中，通过操作相应的内存区域来访问被映射文件的内容。mmap()系统调用函数通常在需要对文件进行频繁读写时使用，用内存读写取代 I/O 读写，以获得较高的性能。
-传统的 UNIX 或 Linux 系统在内核中设有多个缓冲区，当我们调用read()系统调用从文件中读取数据时，内核通常先将该数据复制到一个缓冲区中，再将数据复制到进程的内存空间。
-
-而使用mmap时，内核会在调用进程的虚拟地址空间中创建一个内存映射区，应用进程可以直接访问这段内存获取数据，节省了从内核空间拷贝数据到用户进程空间的开销。mmap并不会真的将文件的内容实时拷贝到内存中，而是在读取数据过程中，触发缺页中断，才会将文件数据复制到内存中。
-
 现代操作系统中常用分页技术进行内存管理，将虚拟内存空间划分成大小相同的 Page，其大小通常是 4KB
 
 
 写入
 BoltDB 中对文件的写入并没有使用mmap技术，而是直接通过Write()与fdatasync()这两个系统调用将数据写入文件。
+在创建一个boltdb文件时，通过fwrite和fdatasync系统调用向磁盘写入32K或者16K的初始文件；在打开一个botldb文件时，用mmap系统调用创建只读内存映射，用来读取文件中各页数据。
 
 
 
@@ -157,7 +600,7 @@ we have known there's no temporary file that means BoltDB use memory or called M
 mmap
 mmap也是以页为单位进行映射的，如果文件大小不是页大小的整数倍，映射的最后一页肯定超过了文件结尾处，这个时候超过部分的内存会初始化为0，对其的写操作不会写入文件。但如果映射的内存范围超过了文件大小，且超出范围大于4k，那对于超过文件所在最后一页地址空间的访问将引发异常。比如我们这里文件实际大小是16K，但我们要映射32K到进程地址空间中，那对超过16K部分的内存访问将会引发异常。实际上，我们前面分析过，Boltdb通过mmap进行了只读映射，故不会存在通过内存映射写文件的问题，同时，对db.data(即映射的内存区域)的访问是通过pgid来访问的，当前database文件里实际包含多少个page是记录在meta中的，每次通过db.data来读取一页时，boltdb均会作超限判断的，所以不会存在对超过当前文件实际页数以外的区域访问的情况
 
-因为boltdb写文件不是通过mmap，而是直接通过fwrite写文件。强调一下，boltdb对数据库的读操作是通过读mmap内存映射区完成的；而写操作是通过文件fseek及fwrite系统调用完成的
+因为boltdb写文件不是通过mmap，而是直接通过fwrite写文件。强调一下，boltdb对数据库的读操作是通过读mmap内存映射区完成的；而写操作是通过文件 fseek 及 fwrite 系统调用完成的
 
 
 
@@ -253,18 +696,32 @@ COW使得BoltDB几乎没有成本地支持一写多读的事务, 但也做不了
 
 
 
-总结：
+# 总结
 原理
 K/V 型存储，使用 B+ 树索引。
 支持事务(ACID)，使用 MVCC 和 COW，允许多个读事务和一个写事务并发执行，但是读事务有可能会阻塞写事务，适合读多写少的场景
 
 BoltDB 的写事务实现比较巧妙，利用 meta 副本和 freelist 机制实现并发控制，提供了一种解决问题的思路。操作系统通过 COW (Copy-On-Write) 技术进行 Page 管理，通过写时复制技术，系统可实现无锁的读写并发，但是无法实现无锁的写写并发，这就注定了这类数据库读性能很高，但是随机写的性能较差，因此非常适合于『读多写少』的场景
 
-在工程中是非常可控的. etcd 和 consul 都用了它, 未必是因为性能有多高而是简单可靠
+未必是因为性能有多高而是简单可靠，在工程中可控 
 
 
 实现
 交流了看源码的一些技巧
 希望可以互相交流讨论
+
+
+## BoltDB 数据结构全景
+
+![](images/posts/boltDB_images/boltdb数据结构全景.png)
+
+
+
+## 适用场景
+
+- 程序需要内嵌数据库
+- 只需要简单的键值存储，不需要复杂的SQL查询与处理
+- 数据读多于写
+- 需要事务保证
 
 最后，系统设计没有银弹，适合的就是最好的

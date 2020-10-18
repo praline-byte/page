@@ -39,8 +39,8 @@ highlight_theme: github
 #      Author      #
 # ---------------- #
 author: Peng wu
-organization: 
-organization_url: 
+organization:
+organization_url:
 github_username: justlegend@126.com
 location: Beijing, China
 email: justlegend@126.com
@@ -57,13 +57,13 @@ navs:
     href: /categories/
     label: 分类
 
-#   -
-#     href: /archives/
-#     label: 归档
+#  -
+#   href: /archives/
+#   label: 归档
 
-#   -
-#     href: /open-source/
-#     label: 开源
+#  -
+#   href: /open-source/
+#   label: 开源
 
   -
     href: /wiki/
@@ -73,9 +73,9 @@ navs:
 #    href: /links/
 #    label: 链接
 
-#  -
-#    href: /about/
-#    label: 关于
+  -
+    href: /about/
+    label: 关于
 
 # ---------------- #
 #       RSS        #
@@ -117,7 +117,7 @@ collections:
 # !!!Important!!! Please modify infos below to yours
 # https://disqus.com
 disqus:
-    username: 
+    username:
 # https://imsun.net/posts/gitment-introduction/
 gitment:
     owner:
@@ -150,6 +150,6 @@ google:
     analytics_id: UA-178409524-1
     adsense:
         footer: true
-        sidebar: true 
+        sidebar: true
         content_header: true
         content_footer: false
