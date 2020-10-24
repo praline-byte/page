@@ -16,7 +16,7 @@ BoltDB 是面向页面的存储引擎，使用 go 实现的 key/value 型数据�
 了解任何一个工程，都要了解它的数据结构，要知道是什么对象在工程里流转，盘活整个上下文逻辑
 
 ## boltDB 数据库文件的基本格式
-![](images/posts/boltDB_images/数据库文件内部布局.png)
+![](images/posts/boltDB_images/db文件基本格式.png)
 
 数据库文件以页为基本单位，一个数据库文件由若干页组成。一个页的大小是由当前OS决定的，即通过 os.GetpageSize() 来决定，对于32位系统，它的值一般为4K字节。一个Boltdb数据库文件的前两页是meta页，第三页是记录freelist的页面，第四页及后续各页则是用于存储K/V的页面，由他们来构建 B+树。
 
