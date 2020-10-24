@@ -2,17 +2,15 @@
 
 # BoltDB 简介
 
-存储引擎一般的分为两大类，日志结构（log-structured） 的存储引擎（例如LSM树），和面向页面（page-oriented） 的存储引擎（例如B树）
+常见的存储引擎一般的分为两大类，日志结构（log-structured） 的存储引擎（例如LSM树），和面向页面（page-oriented） 的存储引擎（例如B树）
 
-BoltDB 是面向页面的存储引擎，使用 go 实现的 key/value 型数据库
+BoltDB 是面向页面的存储引擎，使用 go 实现的 key/value 型数据库。
 
-目标是为不需要完整数据库服务器（如 Postgres 或MySQL）的项目提供一个简单，快速和可靠的数据库
+目标是为不需要完整数据库服务器（如 Postgres 或 MySQL）的项目提供一个简单，快速和可靠的数据库。
 
-支持事务(ACID)，使用 MVCC 和 COW，允许多个读事务和一个写事务并发执行，但是读事务会阻塞写事务
+支持事务(ACID)，使用 MVCC 和 COW，允许多个读事务和一个写事务并发执行，但是读事务会阻塞写事务。
 
-使用它的有开源的 etcd, consul，在公司视频架构内部用于uploader（重构之后的voc模块）保存分片上传的元信息，以及我们 lark_ark 服务中使用的搜索引擎 bleve 默认使用的也是 boltdb
-
-使用它未必是因为性能有多高而是简单可靠，在工程中可控 
+使用它的有开源的 etcd, consul，在公司视频架构内部用于 uploader 保存分片上传的元信息，以及我们 lark_ark 服务中使用的搜索引擎 bleve 默认使用的也是 boltdb。
 
 # 数据结构
 了解任何一个工程，都要了解它的数据结构，要知道是什么对象在工程里流转，盘活整个上下文逻辑
@@ -517,9 +515,6 @@ if err := flock(db, !db.readOnly, options.Timeout); err != nil {
 }
 ```
 
-
-# 高可用
-
 # 总结
 
 
@@ -547,13 +542,6 @@ iterate over the dataset sequentially. Read-write transactions can create and
 delete buckets and can insert and remove keys. Only one read-write transaction
 is allowed at a time.
 
-
-Caveats
-
-The database uses a read-only, memory-mapped data file to ensure that
-applications cannot corrupt the database, however, this means that keys and
-values returned from Bolt cannot be changed. Writing to a read-only byte slice
-will cause Go to panic.
 
 Keys and values retrieved from the database are only valid for the life of
 the transaction. When used outside the transaction, these byte slices can
