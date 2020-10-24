@@ -24,7 +24,7 @@ permalink: /about/
 
 <li>
 微信：<br />
-![](/assets/images/wechat.png)
+<img style="height:192px;width:192px;border:1px solid lightgrey;" src="https://raw.githubusercontent.com/praline-byte/page/master/assets/images/wechat.png" alt="兜里有块糖" />
 </li>
 
 </ul>
