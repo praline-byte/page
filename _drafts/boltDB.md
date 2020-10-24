@@ -1,4 +1,10 @@
-
+---
+layout: post
+title: 搜索引擎（三）—— BoltDB 原理及实现
+categories: 搜索引擎 存储引擎
+description: 
+keywords: 搜索引擎 存储引擎 boltdb
+---
 
 # BoltDB 简介
 
@@ -12,17 +18,28 @@ BoltDB 是面向页面的存储引擎，使用 go 实现的 key/value 型数据�
 
 使用它的有开源的 etcd, consul，在公司视频架构内部用于 uploader 保存分片上传的元信息，以及我们 lark_ark 服务中使用的搜索引擎 bleve 默认使用的也是 boltdb。
 
+>boltDb 代码量不多，核心代码不到4000行，但质量很高，建议大家有时间也阅读一下，对代码能力的提升很有帮助
+>
+>这里我先和大家一起，把主线走一遍，方便之后阅读的时候，更容易一些
+
 # 数据结构
 了解任何一个工程，都要了解它的数据结构，要知道是什么对象在工程里流转，盘活整个上下文逻辑
 
-## boltDB 数据库文件的基本格式
+## BoltDB 数据结构全景
+
+![](images/posts/boltDB_images/boltdb数据结构全景.png)
+
+## boltDB 数据库文件的结构
 ![](images/posts/boltDB_images/db文件基本格式.png)
 
-数据库文件以页为基本单位，一个数据库文件由若干页组成。一个页的大小是由当前OS决定的，即通过 os.GetpageSize() 来决定，对于32位系统，它的值一般为4K字节。一个Boltdb数据库文件的前两页是meta页，第三页是记录freelist的页面，第四页及后续各页则是用于存储K/V的页面，由他们来构建 B+树。
+数据库文件以页为基本单位，一个数据库文件由若干页组成。一个页的大小是由当前OS决定的，即通过 os.GetpageSize() 来决定，对于32位系统，它的值一般为4K。
+一个 Boltdb 数据库文件的前两页是 meta 页，用于存储**元数据信息**，是 boltdb 支持事务和 mvcc 的保障
+第三页是记录 freelist 页，用于回收脏页
+第四页及后续是用于存储 K/V 的页面，由他们来构建 **B+树**
 
 ## BoltDB 中的 B+树结构
 
-![](images/posts/boltDB_images/boltDB中的B+树结构.png)
+![](images/posts/boltDB_images/boltdb中的b+树.png)
 
 boltdb 中有 3 个结构和 B+ 树密切相关：
 
@@ -51,7 +68,7 @@ type page struct {
 }
 ```
 - id: 页面id，如0, 1, 2，...，是从数据库文件内存映射中读取一页的索引值
-- flags: 页面类型，可以分为branchPageFlag、leafPageFlag、metaPageFlag 和 freelistPageFlag，表示分支节点，叶子节点，meta 节点和 freelist 节点
+- flags: 页面类型，可以分为 branchPageFlag、leafPageFlag、metaPageFlag 和 freelistPageFlag，表示分支节点，叶子节点，meta 节点和 freelist 节点
 - count: 页面内存储的元素个数，只在分支节点和叶子节点中有用，对应的元素分别为 branchPageElement 和 leafPageElement
 - overflow: 当前页是否有后续页，如果有，overflow表示后续页的数量，如果没有，则它的值为0，主要用于记录连续多页
 
@@ -96,7 +113,11 @@ type leafPageElement struct {
 
 ## node 的类型定义
 
-Page 加载到内存中要反序列化为 node，以便进行数据修改操作。一个 node 表示为一个 B+Tree 节点，因此需要额外的 unbalanced 与 spilled 字段表明节点是否需要旋转与分裂。node中还会存储父节点与子节点的指针，用于对 key 进行范围查询
+Page 加载到内存中要反序列化为 node，以便进行数据修改操作。
+
+一个 node 表示为一个 B+Tree 节点，因此需要额外的 unbalanced 与 spilled 字段表明节点是否需要旋转与分裂。
+
+node 中还会存储父节点与子节点的指针，用于对 key 进行范围查询
 
 ```
 // node represents an in-memory, deserialized page.
@@ -161,6 +182,63 @@ func (n *node) read(p *page) {
 
 # CRUD
 
+## API
+
+Put
+```
+    b := tx.Bucket([]byte("MyBucket"))
+    err := b.Put([]byte("answer"), []byte("42"))
+```
+
+Get
+```
+    b := tx.Bucket([]byte("MyBucket"))
+    v := b.Get([]byte("answer"))
+```
+
+迭代
+```
+    c := tx.Bucket([]byte("MyBucket"))
+    for k, v := c.First(); k != nil; k, v = c.Next() {
+        fmt.Printf("key=%s, value=%s\n", k, v)
+    }
+```
+
+前缀扫描
+```
+    c := tx.Bucket([]byte("MyBucket")).Cursor()
+    prefix := []byte("1234")
+    for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+        fmt.Printf("key=%s, value=%s\n", k, v)
+    }
+```
+
+范围扫描
+```
+	c := tx.Bucket([]byte("Events")).Cursor()
+    min := []byte("1990-01-01T00:00:00Z")
+    max := []byte("2000-01-01T00:00:00Z")
+    for k, v := c.Seek(min); k != nil && bytes.Compare(k, max) <= 0; k, v = c.Next() {
+        fmt.Printf("%s: %s\n", k, v)
+    }
+```
+
+启动写事务
+```
+err := db.Update(func(tx *bolt.Tx) error {
+    ...
+    return nil
+})
+```
+
+启动读事务
+```
+err := db.View(func(tx *bolt.Tx) error {
+    ...
+    return nil
+})
+```
+
 ## 读流程
 
 ![](images/posts/boltDB_images/读-流程图.png)
@@ -188,9 +266,11 @@ type elemRef struct {
 
 stack是一个切片，每个elemRef指向 B+ Tree 的一个节点，节点可能是已经实例化的node，也可能是未实例化的page，elemRef会存储对应结构的指针，另一个指针则为空，并记录键值对所在的位置。
 
-进行查询时，Cursor 首先从 Bucket.root 对应的 page 开始递归查找，直到最终的叶子节点。Cursor.stack 中保存了查找对应 key 的路径，栈顶保存了 key 所在的结点和位置。除了常规的键值查询操作，Cursor 也支持查询 Bucket 的First、Last、Next、Prev方法，用于相关场景的优化
+进行查询时，Cursor 首先从 Bucket.root 对应的 page 开始递归查找，直到最终的叶子节点。
 
+Cursor.stack 中保存了查找对应 key 的路径，栈顶保存了 key 所在的结点和位置。
 
+除了常规的键值查询操作，Cursor 也支持查询 Bucket 的First、Last、Next、Prev方法，用于相关场景的优化。
 
 ## 写流程
 
@@ -276,9 +356,6 @@ func (tx *Tx) Commit() error {
 ```
 先对 b+树进行调整，再将脏页写到磁盘上，最后将 meta 数据落盘
 
-## API 示例
-
-
 
 # 事务
 
@@ -319,7 +396,6 @@ func (m *meta) write(p *page) {
     m.copy(p.meta())
 }
 ```
-
 
 >每个事务都有一个 txid，其中db.meta.txid 保存了最大的已提交的写事务 id。BoltDB 对写事务和读事务执行不同的 id 分配策略：
 >- 读事务：txid == db.meta.txid；
@@ -424,17 +500,12 @@ func (db *DB) allocate(txid txid, count int) (*page, error) {
 }
 ```
 
-
-
-
-
 ## freelist
 
 当经过反复的增删改查后，文件中会出现没有数据的部分。被清空数据的页可能位于任何位置，BoltDB 并不打算搬移数据、截断文件来将这部分空间返还，而是将这部分空 page，加入内部的 freelist 来维护，当有新的数据写入时，复用这些空间。
 
 > 因此BoltDB 的持久化文件只会增大，而不会因为数据的删除而减少。
 
-todo 字段，更新
 ```
 type freelist struct {
     freelistType   FreelistType        // freelist type
@@ -451,9 +522,9 @@ type txPending struct {
 }
 ```
 
-freelist有FreelistArrayType与FreelistMapType两种类型，默认为FreelistArrayType格式，下面内容也是根据数组类型进行分析。当缓存记录为数组格式时，freelist.ids字段记录了当前空 page 的 pgid，当程序需要 page 时，会调用对应的freelist.arrayAllocate(txid txid, n int) pgid方法遍历ids，从中挑选出n 个连续的空page供调用者使用。
+freelist 有 FreelistArrayType 与 FreelistMapType 两种类型，默认为 FreelistArrayType 格式，下面内容也是根据数组类型进行分析。当缓存记录为数组格式时，freelist.ids字段记录了当前空 page 的 pgid，当程序需要 page 时，会调用对应的 freelist.arrayAllocate(txid txid, n int) pgid方法遍历ids，从中挑选出n 个连续的空page供调用者使用。
 
-当某个写事务产生无用 page时，将调用freelist.free(txid txid, p *page)将指定 page 放入freelist.pending池中，并将freelist.cache中将该 page 设为 true，需要注意的是此时数据被没有被清空。当下一个写事务开启时，会调用freelist.release(txid txid)方法将没有任何事务使用的pending池中的 page 搬移到ids中。
+当某个写事务产生无用 page时，将调用 freelist.free(txid txid, p *page) 将指定 page 放入 freelist.pending池中，并将freelist.cache中将该 page 设为 true，需要注意的是此时数据被没有被清空。当下一个写事务开启时，会调用freelist.release(txid txid)方法将没有任何事务使用的pending池中的 page 搬移到ids中。
 
 BoltDB 这种设计思路，是为了实现多版本并发控制，加速事务的回滚，同时避免对读事务的干扰：
 
@@ -499,14 +570,29 @@ func mmap(db *DB, sz int) error {
 }
 ```
 
+mmap以页为单位进行映射，如果文件大小不是页大小的整数倍，映射的最后一页肯定超过了文件结尾处，这个时候超过部分的内存会初始化为0，对其的写操作不会写入文件。
+
+但如果映射的内存范围超过了文件大小，且超出范围大于4k，那对于超过文件所在最后一页地址空间的访问将引发异常。
+
+比如我们文件实际大小是16K，但我们要映射32K到进程地址空间中，那对超过16K部分的内存访问将会引发异常。
+
+实际上，Boltdb通过mmap进行了只读映射，故不会存在通过内存映射写文件的问题，同时，对db.data(即映射的内存区域)的访问是通过pgid来访问的，
+当前database文件里实际包含多少个page是记录在meta中的，每次通过db.data来读取一页时，boltdb均会作超限判断的，所以不会存在对超过当前文件实际页数以外的区域访问的情况。
+
+>boltdb写文件不是通过mmap，而是直接通过fwrite写文件。强调一下，boltdb对数据库的读操作是通过读mmap内存映射区完成的；而写操作是通过文件 fseek 及 fwrite 系统调用完成的
+
 ## COW
 
 BoltDB 在写入文件时使用了写时复制技术（COW，Copy On Write），当一个页面被更新时，它的内容会被复制到一个新页面，旧页面会被释放。
 
+这样系统可实现无锁的读写并发，但是无法实现无锁的写写并发，这就注定了这类数据库读性能很高，但是随机写的性能较差，因此非常适合于『读多写少』的场景。
+
 # 锁
 
-boltDB 中的六把锁
+BoltDB 中的两把重要锁
 
+##文件锁
+BoltDB 会在数据文件上获得一个文件锁，所以多个进程不能同时打开同一个数据库。 打开一个已经打开的 Bolt 数据库将导致它挂起，直到另一个进程关闭它
 ```
 // 对 db 文件加锁，不允许多个进程对 db 文件进行写操作
 if err := flock(db, !db.readOnly, options.Timeout); err != nil {
@@ -515,201 +601,36 @@ if err := flock(db, !db.readOnly, options.Timeout); err != nil {
 }
 ```
 
-# 总结
+##写事务锁
+不允许写事务并发执行，同一时间只允许一个事务写数据
+```
+func (db *DB) beginRWTx() (*Tx, error) {
+	if db.readOnly {
+		return nil, ErrDatabaseReadOnly
+	}
 
+	// 写锁
+	// 保障有且仅有唯一写事务
+	db.rwlock.Lock()
 
-
-现代操作系统中常用分页技术进行内存管理，将虚拟内存空间划分成大小相同的 Page，其大小通常是 4KB
-
-
-写入
-BoltDB 中对文件的写入并没有使用mmap技术，而是直接通过Write()与fdatasync()这两个系统调用将数据写入文件。
-在创建一个boltdb文件时，通过fwrite和fdatasync系统调用向磁盘写入32K或者16K的初始文件；在打开一个botldb文件时，用mmap系统调用创建只读内存映射，用来读取文件中各页数据。
-
-
-
-
-
-Basics
-
-There are only a few types in Bolt: DB, Bucket, Tx, and Cursor. The DB is
-a collection of buckets and is represented by a single file on disk. A bucket is
-a collection of unique keys that are associated with values.
-
-Transactions provide either read-only or read-write access to the database.
-Read-only transactions can retrieve key/value pairs and can use Cursors to
-iterate over the dataset sequentially. Read-write transactions can create and
-delete buckets and can insert and remove keys. Only one read-write transaction
-is allowed at a time.
-
-
-Keys and values retrieved from the database are only valid for the life of
-the transaction. When used outside the transaction, these byte slices can
-point to different data or can point to invalid memory which will cause a panic.
-
-
-
-// b+tree 原理
-查找，遍历，插入，分裂，平衡
-
-// boltdb 的实现
-boltDb 代码量不多，核心代码不到4000行，但质量很高，建议大家有时间也阅读一下，对代码能力的提升很有帮助
-这里我先和大家一起，把主线走一遍，方便之后阅读的时候，更容易一些
-
-
-page bucket cursor tx db
-
-db: boltdb 的顶级对象
-
-node 是boltDb的头等公民，
-page 主要提供的是xx
-先不细看，我们带着问题再回来找他们
-
-
-// API们
-打开 111
-
-Bolt 会在数据文件上获得一个文件锁，所以多个进程不能同时打开同一个数据库。 打开一个已经打开的 Bolt 数据库将导致它挂起，直到另一个进程关闭它
-todo 文件锁在哪里
-
-
-
-了解一个存储引擎的时候，需要了解在这几个方面是如何实现的
-
-// 数据结构
-// CRUD
-Put
-    b := tx.Bucket([]byte("MyBucket"))
-    err := b.Put([]byte("answer"), []byte("42"))
-
-写入数据的时候，会生成临时文件吗？ 在工程中是非常可控的. etcd和consul都用了它, 未必是因为性能有多高而是简单可靠
-we have known there's no temporary file that means BoltDB use memory or called Mmap to host temporary data. use Mmap means, your BoltDB File should not bigger than your assignable memory space
-
-mmap
-mmap也是以页为单位进行映射的，如果文件大小不是页大小的整数倍，映射的最后一页肯定超过了文件结尾处，这个时候超过部分的内存会初始化为0，对其的写操作不会写入文件。但如果映射的内存范围超过了文件大小，且超出范围大于4k，那对于超过文件所在最后一页地址空间的访问将引发异常。比如我们这里文件实际大小是16K，但我们要映射32K到进程地址空间中，那对超过16K部分的内存访问将会引发异常。实际上，我们前面分析过，Boltdb通过mmap进行了只读映射，故不会存在通过内存映射写文件的问题，同时，对db.data(即映射的内存区域)的访问是通过pgid来访问的，当前database文件里实际包含多少个page是记录在meta中的，每次通过db.data来读取一页时，boltdb均会作超限判断的，所以不会存在对超过当前文件实际页数以外的区域访问的情况
-
-因为boltdb写文件不是通过mmap，而是直接通过fwrite写文件。强调一下，boltdb对数据库的读操作是通过读mmap内存映射区完成的；而写操作是通过文件 fseek 及 fwrite 系统调用完成的
-
-
-
-Get
-    b := tx.Bucket([]byte("MyBucket"))
-    v := b.Get([]byte("answer"))
-
-迭代
-    c := tx.Bucket([]byte("MyBucket"))
-    for k, v := c.First(); k != nil; k, v = c.Next() {
-        fmt.Printf("key=%s, value=%s\n", k, v)
-    }
-
-前缀扫描
-    c := tx.Bucket([]byte("MyBucket")).Cursor()
-
-    prefix := []byte("1234")
-    for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-        fmt.Printf("key=%s, value=%s\n", k, v)
-    }
-
-范围扫描
-	c := tx.Bucket([]byte("Events")).Cursor()
-    min := []byte("1990-01-01T00:00:00Z")
-    max := []byte("2000-01-01T00:00:00Z")
-    for k, v := c.Seek(min); k != nil && bytes.Compare(k, max) <= 0; k, v = c.Next() {
-        fmt.Printf("%s: %s\n", k, v)
-    }
-
-// 持久化
-
-// 事务
-Bolt 一次只允许一个写事务，但是一次允许多个只读事务
-
-启动写事务
-err := db.Update(func(tx *bolt.Tx) error {
-    ...
-    return nil
-})
-
-启动读事务
-err := db.View(func(tx *bolt.Tx) error {
-    ...
-    return nil
-})
-
-
-// 高可用
- 备份
-Blot 是一个单一的文件，所以很容易备份
-使用Tx.WriteTo()函数将数据库的一致视图写入目的地。 如果您从只读事务中调用它，它将执行热备份而不会阻止其他数据库的读写操作
-Tx.CopyFile()
-
-
-// 高性能
-// 统计
-当我们运行一个xx时，需要观测的指标  split, rebalanced
-
-// 使用场景
-就像每个算法模型都有假设空间一样，数据引擎也有一定的使用场景限制
-
-
-所以 boltdb 可以更容易的，与其他组件结合提供更强大的功能
-比如，lark_ark 服务中使用的 bleve 搜索引擎，就提供 boltdb 作为 kvstore 层的支持
-
-boltdb 大概就是这样，我们也可以对其二次开发，进行改造，支持我们提到的特性
-
-在评估和使用 Bolt 时，需要注意以下几点
-Bolt 适合读取密集型工作负载。顺序写入性能也很快，但随机写入可能会很慢。您可以使用DB.Batch()或添加预写日志来帮助缓解此问题。
-尽量避免长时间运行读取事务。 Bolt使用copy-on-write技术，旧的事务正在使用，旧的页面不能被回收。
-Bolt在数据库文件上使用独占写入锁，因此不能被多个进程共享
-将大量批量随机写入加载到新存储区可能会很慢，因为页面在事务提交之前不会分裂。不建议在单个事务中将超过 100,000 个键/值对随机插入单个新 bucket中。
-Bolt使用内存映射文件，以便底层操作系统处理数据的缓存。 通常情况下，操作系统将缓存尽可能多的文件，并在需要时释放内存到其他进程。 这意味着Bolt在处理大型数据库时可以显示非常高的内存使用率。 但是，这是预期的，操作系统将根据需要释放内存。 Bolt可以处理比可用物理RAM大得多的数据库，只要它的内存映射适合进程虚拟地址空间
-
-Bolt数据库中的数据结构是存储器映射的，所以数据文件将是endian特定的。 这意味着你不能将Bolt文件从一个小端机器复制到一个大端机器并使其工作。 对于大多数用户来说，这不是一个问题，因为大多数现代的CPU都是小端的
-// todo 存储器映射？
-由于页面在磁盘上的布局方式，Bolt无法截断数据文件并将空闲页面返回到磁盘。 相反，Bolt 在其数据文件中保留一个未使用页面的空闲列表。 这些免费页面可以被以后的交易重复使用。 由于数据库通常会增长，所以对于许多用例来说，这是很好的方法 但是，需要注意的是，删除大块数据不会让您回收磁盘上的空间
-
-
-
-
-对比
-如果您需要高随机写入吞吐量（> 10,000 w / sec）或者您需要使用旋转磁盘，则 LevelDB可能是一个不错的选择。 如果你的应用程序是重读的，或者做了很多范围扫描，Bolt 可能是一个不错的选择
-内存 > 数据库 && 读稳定 > 写稳定 && 读性能 > 写性能
-因此在之后的搜人场景，可以使用
-
-缺点
-没有WAL/redo log, 变动直接打入B+Tree
-
-一方面看这确实是优点, 另一方面也导致了很多更好的优化做不了. 因为没有log保护中间状态, B+Tree自身必须具有原子性. BoltDB通过COW(copy on write)来达成, 带来了可观的开销. 即使只对某个page改了1 byte也必须重写整页, 连带parent到root都需要重写, 直至meta page, 有写放大的问题. meta page更新成功是操作成功的依据.
-
-COW使得BoltDB几乎没有成本地支持一写多读的事务, 但也做不了并发写事务了, 因为双meta page只能确保至少一份是有效的. BoltDB提供了batch write可以自我安慰一下
-
+    ·····
+}
+```
 
 
 # 总结
-原理
+
 K/V 型存储，使用 B+ 树索引。
-支持事务(ACID)，使用 MVCC 和 COW，允许多个读事务和一个写事务并发执行，但是读事务有可能会阻塞写事务，适合读多写少的场景
 
-BoltDB 的写事务实现比较巧妙，利用 meta 副本和 freelist 机制实现并发控制，提供了一种解决问题的思路。操作系统通过 COW (Copy-On-Write) 技术进行 Page 管理，通过写时复制技术，系统可实现无锁的读写并发，但是无法实现无锁的写写并发，这就注定了这类数据库读性能很高，但是随机写的性能较差，因此非常适合于『读多写少』的场景
+支持事务(ACID)，使用 MVCC 和 COW，允许多个读事务和一个写事务并发执行。
 
-未必是因为性能有多高而是简单可靠，在工程中可控 
+没有 WAL/redo log, 变动直接打入 B+Tree。
+>一方面看这确实是优点, 另一方面也导致了很多更好的优化做不了。因为没有 log 保护中间状态, B+树自身必须具有原子性。
 
-
-实现
-交流了看源码的一些技巧
-希望可以互相交流讨论
-
-
-## BoltDB 数据结构全景
-
-![](images/posts/boltDB_images/boltdb数据结构全景.png)
-
-
-
-## 适用场景
-
-- 程序需要内嵌数据库
-- 只需要简单的键值存储，不需要复杂的SQL查询与处理
-- 数据读多于写
-- 需要事务保证
+就像每个算法模型都有假设空间一样，数据引擎也有一定的使用场景限制，所以在评估和使用 BoltDB 时，需要注意以下几点：
+1. 适合读取密集型。顺序写性能快，但随机写很慢。可以使用 DB.Batch() 或添加预写日志 的方式缓解此问题。
+2. 尽量避免长时间运行读事务。 BoltDB 使用 COW 技术，旧事务正在使用时，旧页面不能被回收。
+3. 在数据库文件上使用独占写入锁，因此不能被多个进程共享。
+4. 写放大。即使只改动一个字节也必须重写整页, 极端情况连带 parent 到 root 都需要重写, 直至 meta page。
 
 最后，系统设计没有银弹，适合的就是最好的
