@@ -8,7 +8,7 @@ keywords: 搜索引擎 存储引擎 boltdb
 
 # BoltDB 简介
 
-常见的存储引擎一般的分为两大类，日志结构（log-structured） 的存储引擎（例如LSM树），和面向页面（page-oriented） 的存储引擎（例如B树）
+常见的存储引擎一般的分为两大类，日志结构（log-structured）的存储引擎（例如LSM树），和面向页面（page-oriented）的存储引擎（例如B树）。
 
 BoltDB 是面向页面的存储引擎，使用 go 实现的 key/value 型数据库。
 
@@ -18,7 +18,7 @@ BoltDB 是面向页面的存储引擎，使用 go 实现的 key/value 型数据�
 
 使用它的有开源的 etcd, consul，在公司视频架构内部用于 uploader 保存分片上传的元信息，以及我们 lark_ark 服务中使用的搜索引擎 bleve 默认使用的也是 boltdb。
 
->boltDb 代码量不多，核心代码不到4000行，但质量很高，建议大家有时间也阅读一下，对代码能力的提升很有帮助
+>BoltDb 代码量不多，核心代码不到4000行，但质量很高，建议大家有时间也阅读一下，对代码能力的提升很有帮助
 >
 >这里我先和大家一起，把主线走一遍，方便之后阅读的时候，更容易一些
 
@@ -29,21 +29,24 @@ BoltDB 是面向页面的存储引擎，使用 go 实现的 key/value 型数据�
 
 ![](/images/posts/boltDB_images/boltdb数据结构全景.png)
 
-## boltDB 数据库文件的结构
+## BoltDB 数据库文件的结构
 ![](/images/posts/boltDB_images/db文件基本格式.png)
 
-数据库文件以页为基本单位，一个数据库文件由若干页组成。一个页的大小是由当前OS决定的，即通过 os.GetpageSize() 来决定，对于32位系统，它的值一般为4K。
-一个 Boltdb 数据库文件的前两页是 meta 页，用于存储**元数据信息**，是 boltdb 支持事务和 mvcc 的保障
-第三页是记录 freelist 页，用于回收脏页
-第四页及后续是用于存储 K/V 的页面，由他们来构建 **B+树**
+>数据库文件以页为基本单位，一个数据库文件由若干页组成。一个页的大小是由当前OS决定的，即通过 os.GetpageSize() 来决定，对于32位系统，它的值一般为4K。
+
+一个 BoltDB 数据库文件的前两页是 meta 页，用于存储**元数据信息**，是 BoltDB 支持事务和 mvcc 的保障。
+
+第三页是记录 freelist 页，用于回收脏页。
+
+第四页及后续是用于存储 K/V 的页面，由他们来构建 **B+树**。
 
 ## BoltDB 中的 B+树结构
 
 ![](/images/posts/boltDB_images/boltdb中的b+树.png)
 
-boltdb 中有 3 个结构和 B+ 树密切相关：
+BoltDB 中有 3 个结构和 B+ 树密切相关：
 
-- page: 大小一般为 4096 bytes，对应文件里的每个 page，读写文件都是以 page 为单位。
+- page: 大小一般为 4096 bytes，对应磁盘文件里的每个 page，读写文件都是以 page 为单位。
 - node: B+ 树的单个结点，访问结点时首先将 page 的内容转换为内存中的 node，每个 node 对应一个或多个连续的 page。
 - bucket: 每个 bucket 都是一个完整的 B+ 树，所有操作都是针对 bucket
 
@@ -115,7 +118,7 @@ type leafPageElement struct {
 
 Page 加载到内存中要反序列化为 node，以便进行数据修改操作。
 
-一个 node 表示为一个 B+Tree 节点，因此需要额外的 unbalanced 与 spilled 字段表明节点是否需要旋转与分裂。
+一个 node 表示为一个 B+Tree 节点，因此需要额外的 unbalanced 与 spilled 字段表明节点是否需要平衡和分裂。
 
 node 中还会存储父节点与子节点的指针，用于对 key 进行范围查询
 
@@ -143,7 +146,7 @@ type inode struct {
 type inodes []inode // page中的键值对会存在node.inodes中，并且一一对应，可以通过切片下标访问某个键值对
 ```
 
-boltDB 通过 node.read(p *page)，实现 page 的反序列化过程，将 page 实例化为 node
+BoltDB 通过 node.read(p *page)，实现 page 的反序列化过程，将 page 实例化为 node
 ```
 // read initializes the node from a page.
 func (n *node) read(p *page) {
@@ -177,8 +180,9 @@ func (n *node) read(p *page) {
 
 ## bucket
 
-每一个 bucket 都是一个完整的 B+Tree，将多个节点页面组织起来。对于 boltDB 来说，bucket 属于对外的结构，我们在 CRUD 中详细说明
+每一个 bucket 都是一个完整的 B+Tree，将多个节点页面组织起来。对于 boltDB 来说，bucket 属于对外的结构，我们在 CRUD 中详细说明。
 
+这样 BoltDB 中和 B+ 树密切相关的 3 个结构就介绍完了，之后来介绍 BoltDB 是怎么运转的。
 
 # CRUD
 
@@ -274,54 +278,78 @@ Cursor.stack 中保存了查找对应 key 的路径，栈顶保存了 key 所在
 
 ## 写流程
 
-流程图
+### 流程图
 
 ![](/images/posts/boltDB_images/写-流程图.png)
 
-### 怎么回收脏页
+BoltDB 中的一次写事务有两部分**初始化写事务**和**事务提交**两部分，在事务提交过程中，对失败行为会进行回滚处理。
 
-事务提交时，将其对应的脏页添列表加进freelist的等待队列集合中。而数据结构DB中保存了所有正在进行中的事务ID。所有的写事务会递增ID，而读事务使用当前版本的ID（两个meta页中事务ID最大的一个）。因此，在创建新的写事物时，通过遍历DB中的所有事务，找出ID最小的minID, freelist的等待释放集合中任何小于minID的脏页列表都可以被安全释放
-
-db 中维护了正在进行的读事务:
-
-创建读事务时，会追加到 db.txs:
-
-`db.txs = append(db.txs, t)`
-
-当读事务 rollback 时(boltdb 的读事务完成要调用 Tx.Rollback())，会从中移除:
-
-`tx.db.removeTx(tx)`
-
-在创建写事务时，会找到 db.txs 中最小的 txid，释放 freelist.pending 中所有 txid 小于它的 pending page
+### 初始化写事务
+开始写事务会申请写锁保护，初始化 tx 事务结构，并回收脏页。
+在初始化 tx 事务结构时，需要 copy meta 对象，需要对 meta 加锁。
 
 ```
-var minid txid = 0xFFFFFFFFFFFFFFFF
-for _, t := range db.txs {
-    if t.meta.txid < minid {
-        minid = t.meta.txid
-    }
-}
-if minid > 0 {
-    // 会将 pending 中 txid 小于 minid - 1 的事务释放的 page 合入 ids
-    db.freelist.release(minid - 1) 
-}
+func (db *DB) beginRWTx() (*Tx, error) {
+    ···
 
-······
+	// 保障有且仅有唯一写事务
+	db.rwlock.Lock()
+    
+    // 元数据锁，用于构建 tx 事务
+	db.metalock.Lock()
+	defer db.metalock.Unlock()
 
-// 释放 freelist.pending 中所有 txid 小于它的 pending page
-for tid, txp := range f.pending {
-    if tid <= txid {
-        m = append(m, txp.ids...)
-        delete(f.pending, tid)
-    }
+	···
+    // 这里会初始化 tx 事务结构，copy 一份 meta 数据
+    t := &Tx{writable: true}
+    t.init(db)
+
+    ···
+    // 进行脏页回收
+	db.freePages()
 }
 
 ```
 
-> 能不能在写事务提交的时候判断旧的 page 能不能用于分配，而不是在下一个写事务开始时清理？\
-> 是可以的，不过要求在写入 freelist 和 metadata 的时候不能有新的读事务进行，需要牺牲一定的性能。
+初始化 tx 事务对象
+```
+// init initializes the transaction.
+func (tx *Tx) init(db *DB) {
+	···
+    // 因为 meta 会被写事务修改，所以必须copy一份到内存里
+	tx.meta = &meta{}
+	db.meta().copy(tx.meta)
+    
+    ···
+	// 写事务这里会 事务ID + 1
+	if tx.writable {
+		tx.pages = make(map[pgid]*page)
+		tx.meta.txid += txid(1)
+	}
+}
+```
 
-一次事务提交过程
+脏页回收
+```
+// 脏页回收会获取当前读事务(db.txs维护)中最小的 txid
+// 对所有小于最小 txid 的持有的 page 可以进行回收
+func (db *DB) freePages() {
+	// Free all pending pages prior to earliest open transaction.
+	sort.Sort(txsById(db.txs))
+	minid := txid(0xFFFFFFFFFFFFFFFF)
+	if len(db.txs) > 0 {
+		minid = db.txs[0].meta.txid
+	}
+	if minid > 0 {
+		db.freelist.release(minid - 1)
+	}
+	···
+}
+
+```
+
+
+### 事务提交
 ```
 // 提交事务
 func (tx *Tx) Commit() error {
@@ -359,7 +387,7 @@ func (tx *Tx) Commit() error {
 
 # 事务
 
-boltdb 支持完整的事务特性(ACID)，使用 MVCC 并发控制，允许多个读事务和一个写事务并发执行，但是读事务有可能会阻塞写事务。
+BoltDB 支持完整的事务特性(ACID)，使用 MVCC 并发控制，允许多个读事务和一个写事务并发执行，但是读事务有可能会阻塞写事务。
 
 - Atomicity: 未提交的写事务操作都在内存中进行；提交的写事务会按照 B+ 树数据、freelist、metadata 的顺序写入文件，只有 metadata 写入成功，整个事务才算完成，只写入前两个数据对数据库无影响。
 - Isolation: 每个读事务开始时会获取一个版本号，读事务涉及到的 page 不会被写事务覆盖；提交的写事务会更新数据库的版本号
@@ -406,7 +434,7 @@ func (m *meta) write(p *page) {
 完全执行或完全不执行
 
 BoltDB 的写操作都是在内存中进行，若事务未 commit 时出错，不会对数据库造成影响
-若是在 commit 的过程中出错，BoltDB 写入文件的顺序也保证了不会造成影响：因为数据会写在新的 page 中不会覆盖原来的数据，且此时 meta中的信息不发生变化。
+若是在 commit 的过程中出错，BoltDB 写入文件的顺序也保证了不会造成影响：因为数据会写在新的 page 中不会覆盖原来的数据，且此时 meta 中的信息不发生变化。
 
     1. 开始一份写事务时，会拷贝一份 meta数据；
     2. 从 rootBucket 开始，遍历 B+树 查找数据位置并修改；
@@ -417,7 +445,7 @@ BoltDB 的写操作都是在内存中进行，若事务未 commit 时出错，�
 
 关键就是要保证 metadata 写入出错也不会影响数据库
 
-boltDB 使用交替 metadata 和 checksum 保证 meta 不会损坏
+BoltDB 使用交替 metadata 和 checksum 保证 meta 不会损坏
 
 ```
 // meta retrieves the current meta page reference.
@@ -500,11 +528,11 @@ func (db *DB) allocate(txid txid, count int) (*page, error) {
 }
 ```
 
-## freelist
+## Freelist
 
 当经过反复的增删改查后，文件中会出现没有数据的部分。被清空数据的页可能位于任何位置，BoltDB 并不打算搬移数据、截断文件来将这部分空间返还，而是将这部分空 page，加入内部的 freelist 来维护，当有新的数据写入时，复用这些空间。
 
-> 因此BoltDB 的持久化文件只会增大，而不会因为数据的删除而减少。
+> 因此 BoltDB 的持久化文件只会增大，而不会因为数据的删除而减少。
 
 ```
 type freelist struct {
@@ -522,14 +550,63 @@ type txPending struct {
 }
 ```
 
-freelist 有 FreelistArrayType 与 FreelistMapType 两种类型，默认为 FreelistArrayType 格式，下面内容也是根据数组类型进行分析。当缓存记录为数组格式时，freelist.ids字段记录了当前空 page 的 pgid，当程序需要 page 时，会调用对应的 freelist.arrayAllocate(txid txid, n int) pgid方法遍历ids，从中挑选出n 个连续的空page供调用者使用。
+Freelist 有 FreelistArrayType 与 FreelistMapType 两种类型，默认为 FreelistArrayType 格式，下面内容也是根据数组类型进行分析。当缓存记录为数组格式时，freelist.ids字段记录了当前空 page 的 pgid，当程序需要 page 时，会调用对应的 freelist.arrayAllocate(txid txid, n int) pgid方法遍历ids，从中挑选出n 个连续的空page供调用者使用。
 
 当某个写事务产生无用 page时，将调用 freelist.free(txid txid, p *page) 将指定 page 放入 freelist.pending池中，并将freelist.cache中将该 page 设为 true，需要注意的是此时数据被没有被清空。当下一个写事务开启时，会调用freelist.release(txid txid)方法将没有任何事务使用的pending池中的 page 搬移到ids中。
 
-BoltDB 这种设计思路，是为了实现多版本并发控制，加速事务的回滚，同时避免对读事务的干扰：
+>BoltDB 这种设计思路，是为了实现多版本并发控制，加速事务的回滚，同时避免对读事务的干扰：
+>
+>- 当写事务更新数据时，并不会直接覆盖旧数据所在的页，而且分配一个新的 page 将更新后的数据写入，然后将旧数据占用的 page 放入freelist.pending池中，并建立新的索引。
+>- 当事务需要回滚时，只需要将pending池中的 page 删除，将索引回滚为原来的页面。
+>- 当发起一个读事务时，会单独复制一份meta信息，从这份独有的meta作为入口，可以读出该meta指向的数据。此时即使有写事务修改了相关 key 的数据，修改后的数据只会被写入新的 page，读事务引用的旧 page 会进入pending 池，与该读事务相关的数据并不会被修改。
+>- 当该 page 相关的读事务都结束时，才会被复用修改
 
-当写事务更新数据时，并不会直接覆盖旧数据所在的页，而且分配一个新的 page 将更新后的数据写入，然后将旧数据占用的 page 放入freelist.pending池中，并建立新的索引。当事务需要回滚时，只需要将pending池中的 page 删除，将索引回滚为原来的页面。
-当发起一个读事务时，会单独复制一份meta信息，从这份独有的meta作为入口，可以读出该meta指向的数据。此时即使有写事务修改了相关 key 的数据，修改后的数据只会被写入新的 page，读事务引用的旧 page 会进入pending 池，与该读事务相关的数据并不会被修改。当该 page 相关的读事务都结束时，才会被复用修改
+
+## 回收脏页
+
+怎么回收脏页？
+
+事务提交时，将其对应的脏页添列表加进freelist的等待队列集合中。而数据结构DB中保存了所有正在进行中的事务ID。所有的写事务会递增ID，而读事务使用当前版本的ID（两个meta页中事务ID最大的一个）。
+因此，在创建新的写事物时，通过遍历DB中的所有事务，找出ID最小的minID, freelist的等待释放集合中任何小于minID的脏页列表都可以被安全释放
+
+db 中维护了正在进行的读事务:
+
+创建读事务时，会追加到 db.txs:
+
+`db.txs = append(db.txs, t)`
+
+当读事务 rollback 时(boltdb 的读事务完成要调用 Tx.Rollback())，会从中移除:
+
+`tx.db.removeTx(tx)`
+
+在创建写事务时，会找到 db.txs 中最小的 txid，释放 freelist.pending 中所有 txid 小于它的 pending page
+
+```
+var minid txid = 0xFFFFFFFFFFFFFFFF
+for _, t := range db.txs {
+    if t.meta.txid < minid {
+        minid = t.meta.txid
+    }
+}
+if minid > 0 {
+    // 会将 pending 中 txid 小于 minid - 1 的事务释放的 page 合入 ids
+    db.freelist.release(minid - 1) 
+}
+
+······
+
+// 释放 freelist.pending 中所有 txid 小于它的 pending page
+for tid, txp := range f.pending {
+    if tid <= txid {
+        m = append(m, txp.ids...)
+        delete(f.pending, tid)
+    }
+}
+
+```
+
+> 能不能在写事务提交的时候判断旧的 page 能不能用于分配，而不是在下一个写事务开始时清理？\
+> 是可以的，不过要求在写入 freelist 和 metadata 的时候不能有新的读事务进行，需要牺牲一定的性能。
 
 # 高性能
 
@@ -591,7 +668,7 @@ BoltDB 在写入文件时使用了写时复制技术（COW，Copy On Write），
 
 BoltDB 中的两把重要锁
 
-##文件锁
+## 文件锁
 BoltDB 会在数据文件上获得一个文件锁，所以多个进程不能同时打开同一个数据库。 打开一个已经打开的 Bolt 数据库将导致它挂起，直到另一个进程关闭它
 ```
 // 对 db 文件加锁，不允许多个进程对 db 文件进行写操作
@@ -601,7 +678,7 @@ if err := flock(db, !db.readOnly, options.Timeout); err != nil {
 }
 ```
 
-##写事务锁
+## 事务锁
 不允许写事务并发执行，同一时间只允许一个事务写数据
 ```
 func (db *DB) beginRWTx() (*Tx, error) {
@@ -633,4 +710,4 @@ K/V 型存储，使用 B+ 树索引。
 3. 在数据库文件上使用独占写入锁，因此不能被多个进程共享。
 4. 写放大。即使只改动一个字节也必须重写整页, 极端情况连带 parent 到 root 都需要重写, 直至 meta page。
 
-最后，系统设计没有银弹，适合的就是最好的
+最后，系统设计没有银弹，适合的就是最好的。
