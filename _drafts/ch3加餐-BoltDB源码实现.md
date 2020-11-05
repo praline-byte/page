@@ -110,7 +110,7 @@ type leafPageElement struct {
 
 ## elements 的内存布局
 
-![](/images/posts/boltDB_images/elements的内存布局.png)
+![](/images/posts/boltDB_images/page内存布局.png)
 
 将 Element 和键值对分开存储减少了查找的时间，因为Element结构体的大小是固定的，我们可以在 O(1) 时间复杂度内获取所有的Element ，若是以 [header，key value...] 格式存储，需要按顺序遍历查找。
 
@@ -280,7 +280,7 @@ Cursor.stack 中保存了查找对应 key 的路径，栈顶保存了 key 所在
 
 ### 流程图
 
-![](/images/posts/boltDB_images/写-流程图.png)
+![](/images/posts/boltDB_images/boltDb-写流程.png)
 
 BoltDB 中的一次写事务有两部分**初始化写事务**和**事务提交**两部分，在事务提交过程中，对失败行为会进行回滚处理。
 
@@ -490,6 +490,9 @@ boltdb 支持多个读事务与一个写事务同时执行，写事务提交时�
     freelist.pending: 维护了每个写事务释放的 page id。
     freelist.ids: 维护了可以用于分配的 page id。
 
+
+**CRUD，修改B+树，会对读事务有影响吗？**
+不会，因为写事务开启时，复制了root节点，且对page的改动发生在新page，所以不会对读产生影响
 
 ## Durability
 
