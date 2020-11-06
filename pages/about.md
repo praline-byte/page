@@ -24,9 +24,11 @@ permalink: /about/
 
 <li>
 微信：<br />
-<img style="height:192px;width:192px;border:1px solid lightgrey;" src="https://raw.githubusercontent.com/praline-byte/page/master/assets/images/wechat.png" alt="兜里有块糖" />
+<img style="height:192px;width:192px;border:1px solid lightgrey;" src="https://i.niupic.com/images/2020/11/06/8XrN.jpeg
+" alt="兜里有块糖" />
 </li>
 
+wechat: justlegend126
 </ul>
 
 
