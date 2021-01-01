@@ -1,7 +1,7 @@
 ---
 layout: post
 title: Raft 一致性共识算法（三）—— 干活了兄弟们
-categories: raft 
+categories: Raft 
 description: 
 keywords: 一致性共识 分布式 raft 日志复制
 ---
