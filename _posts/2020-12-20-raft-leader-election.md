@@ -1,7 +1,7 @@
 ---
 layout: post
 title: Raft 一致性共识算法（二）—— 领导者选举
-categories: 一致性共识 分布式 raft 
+categories: raft 
 description: 
 keywords: 一致性共识 分布式 raft 领导者选举
 ---
